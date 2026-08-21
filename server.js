@@ -85,6 +85,22 @@ app.get('/auth/callback', async (req, res) => {
     }
 
     log('✅ Access token received', { shop });
+
+    // Save/update the merchant record so downstream lookups (order webhook,
+    // /api/stats, /debug/webhooks) can find this shop by shop_name.
+    const { error: customerError } = await supabase
+      .from('customers')
+      .upsert(
+        { shop_name: shop, api_key: SHOPIFY_API_KEY, access_token: accessToken },
+        { onConflict: 'shop_name' }
+      );
+
+    if (customerError) {
+      log('❌ Failed to save customer', { shop, error: customerError.message });
+      return res.status(500).json({ error: 'Failed to save merchant', details: customerError.message });
+    }
+
+    log('✅ Customer saved to Supabase', { shop });
     log('✅ OAuth complete - webhook registration next', { shop });
 
     // Register webhook for orders (REST API)
@@ -133,14 +149,9 @@ app.get('/auth/callback', async (req, res) => {
 app.post('/webhooks/orders/create', async (req, res) => {
   try {
     const order = req.body;
-    const shopHeader = req.headers['x-shopify-shop-api-access-token'];
-
-    // Get shop name from the webhook - Shopify sends it in the header or we parse it from order
-    let shopName = shopHeader;
-    if (!shopName || shopName.length > 100) {
-      // Fallback: extract from referer or try to find from database
-      shopName = req.headers.referer?.match(/https:\/\/([^.]+\.[^.]+\.myshopify\.com)/)?.[1];
-    }
+    // Shopify sends the originating shop's domain in this header on every
+    // webhook delivery (Express lowercases header names).
+    const shopName = req.headers['x-shopify-shop-domain'];
 
     log('📦 New order webhook received', {
       orderId: order.id,
