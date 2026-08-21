@@ -86,10 +86,10 @@ app.get('/auth/callback', async (req, res) => {
 
     log('✅ Access token received', { shop });
 
-    // Save to Supabase
+    // Save to Supabase (non-blocking)
     log('💾 Saving customer to Supabase', { shop });
 
-    const { data, error } = await supabase
+    supabase
       .from('customers')
       .upsert(
         [
@@ -101,14 +101,17 @@ app.get('/auth/callback', async (req, res) => {
           }
         ],
         { onConflict: 'shop_name' }
-      );
-
-    if (error) {
-      log('❌ Supabase error', error);
-      return res.status(500).json({ error: 'Failed to save customer', details: error.message });
-    }
-
-    log('✅ Customer saved', { shop, plan: 'basic' });
+      )
+      .then(({ data, error }) => {
+        if (error) {
+          log('⚠️  Supabase save warning (non-blocking)', error.message);
+        } else {
+          log('✅ Customer saved', { shop, plan: 'basic' });
+        }
+      })
+      .catch(err => {
+        log('⚠️  Supabase save error (caught)', err.message);
+      });
 
     // Register webhook for orders
     try {
