@@ -176,12 +176,53 @@ app.get('/auth/callback', async (req, res) => {
 app.post('/webhooks/orders/create', async (req, res) => {
   try {
     const order = req.body;
-    const shop = req.headers['x-shopify-shop-api-access-token'];
+    const shopHeader = req.headers['x-shopify-shop-api-access-token'];
 
-    log('📦 New order webhook received', { orderId: order.id, shop });
+    // Get shop name from the webhook - Shopify sends it in the header or we parse it from order
+    let shopName = shopHeader;
+    if (!shopName || shopName.length > 100) {
+      // Fallback: extract from referer or try to find from database
+      shopName = req.headers.referer?.match(/https:\/\/([^.]+\.[^.]+\.myshopify\.com)/)?.[1];
+    }
 
-    // TODO: Save order to Supabase
-    // TODO: Trigger n8n webhook
+    log('📦 New order webhook received', {
+      orderId: order.id,
+      customerEmail: order.email,
+      customerPhone: order.customer?.phone || order.billing_address?.phone
+    });
+
+    // Get customer record to link order
+    let customerId;
+    if (shopName) {
+      const { data: customer } = await supabase
+        .from('customers')
+        .select('id')
+        .eq('shop_name', shopName)
+        .single();
+      customerId = customer?.id;
+    }
+
+    // Save order to Supabase
+    if (customerId) {
+      const { data: savedOrder, error: orderError } = await supabase
+        .from('orders')
+        .insert([{
+          customer_id: customerId,
+          shopify_order_id: order.id.toString(),
+          phone_number: order.customer?.phone || order.billing_address?.phone,
+          order_data: order,
+          status: 'pending',
+          whatsapp_sent: false
+        }]);
+
+      if (orderError) {
+        log('❌ Failed to save order', { orderId: order.id, error: orderError.message });
+      } else {
+        log('✅ Order saved to Supabase', { orderId: order.id, customerId });
+      }
+    } else {
+      log('⚠️  Could not find customer for order', { orderId: order.id });
+    }
 
     res.status(200).json({ success: true, orderId: order.id });
   } catch (error) {
