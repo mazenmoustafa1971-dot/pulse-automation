@@ -3,6 +3,7 @@ const dotenv = require('dotenv');
 const axios = require('axios');
 const cors = require('cors');
 const bodyParser = require('body-parser');
+const crypto = require('crypto');
 const supabase = require('./supabase');
 
 dotenv.config();
@@ -11,7 +12,10 @@ const app = express();
 
 // Middleware
 app.use(cors());
-app.use(bodyParser.json());
+// Capture the exact raw request body so webhook HMAC signatures can be
+// verified against the untouched bytes Shopify signed (re-serialized JSON
+// can differ in key order/whitespace and would fail verification).
+app.use(bodyParser.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // Constants
@@ -25,6 +29,35 @@ const APP_VERSION = '0.1.0';
 const log = (message, data = '') => {
   console.log(`[${new Date().toISOString()}] ${message}`, data);
 };
+
+// Verify a webhook request actually came from Shopify by recomputing the
+// HMAC over the raw body with the app's client secret and comparing it,
+// in constant time, to the signature Shopify sent.
+function verifyShopifyWebhook(req, res, next) {
+  const hmacHeader = req.headers['x-shopify-hmac-sha256'];
+
+  if (!hmacHeader || !req.rawBody) {
+    log('❌ Webhook rejected: missing HMAC header or body');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const digest = crypto
+    .createHmac('sha256', SHOPIFY_API_SECRET)
+    .update(req.rawBody)
+    .digest('base64');
+
+  const digestBuf = Buffer.from(digest);
+  const headerBuf = Buffer.from(hmacHeader);
+
+  const valid = digestBuf.length === headerBuf.length && crypto.timingSafeEqual(digestBuf, headerBuf);
+
+  if (!valid) {
+    log('❌ Webhook rejected: HMAC mismatch');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  next();
+}
 
 // ============================================================
 // OAuth Flow
@@ -146,7 +179,7 @@ app.get('/auth/callback', async (req, res) => {
 // ============================================================
 
 // Webhook: New order created
-app.post('/webhooks/orders/create', async (req, res) => {
+app.post('/webhooks/orders/create', verifyShopifyWebhook, async (req, res) => {
   try {
     const order = req.body;
     // Shopify sends the originating shop's domain in this header on every
@@ -197,6 +230,95 @@ app.post('/webhooks/orders/create', async (req, res) => {
     log('❌ Webhook error', error.message);
     res.status(500).json({ error: 'Webhook failed' });
   }
+});
+
+// ============================================================
+// Mandatory GDPR Compliance Webhooks
+// Every Shopify app that can access customer data must implement these
+// three -- Shopify won't approve a Protected Customer Data request until
+// they exist and respond correctly.
+// ============================================================
+
+// A customer asked the merchant for a copy of their data.
+// Shopify requires the merchant be able to provide it within 30 days --
+// PULSE doesn't have an automated export yet, so this logs what's on file
+// (linked by phone number, the only customer identifier PULSE stores)
+// for manual fulfillment.
+app.post('/webhooks/customers/data_request', verifyShopifyWebhook, async (req, res) => {
+  const { shop_domain, customer } = req.body;
+  log('📋 GDPR data request received', { shop: shop_domain, customerId: customer?.id });
+
+  try {
+    const { data: cust } = await supabase
+      .from('customers')
+      .select('id')
+      .eq('shop_name', shop_domain)
+      .single();
+
+    if (cust && customer?.phone) {
+      const { data: orders } = await supabase
+        .from('orders')
+        .select('id, shopify_order_id, created_at')
+        .eq('customer_id', cust.id)
+        .eq('phone_number', customer.phone);
+      log('📋 PULSE data on file for this customer', { orderRows: orders?.length || 0 });
+    }
+  } catch (err) {
+    log('⚠️  Data request lookup error (non-fatal)', err.message);
+  }
+
+  res.status(200).json({ success: true });
+});
+
+// A customer asked the merchant to delete their data.
+app.post('/webhooks/customers/redact', verifyShopifyWebhook, async (req, res) => {
+  const { shop_domain, customer } = req.body;
+  log('🗑️  GDPR customer redact received', { shop: shop_domain, customerId: customer?.id });
+
+  try {
+    const { data: cust } = await supabase
+      .from('customers')
+      .select('id')
+      .eq('shop_name', shop_domain)
+      .single();
+
+    if (cust && customer?.phone) {
+      const { error } = await supabase
+        .from('orders')
+        .delete()
+        .eq('customer_id', cust.id)
+        .eq('phone_number', customer.phone);
+
+      if (error) log('❌ Failed to redact customer orders', error.message);
+      else log('✅ Customer orders redacted', { shop: shop_domain });
+    }
+  } catch (err) {
+    log('❌ Customer redact error', err.message);
+  }
+
+  res.status(200).json({ success: true });
+});
+
+// The shop uninstalled the app; sent ~48h later. Delete everything tied to
+// this shop. ON DELETE CASCADE on orders/messages/preorders means removing
+// the customer row takes all of it with it.
+app.post('/webhooks/shop/redact', verifyShopifyWebhook, async (req, res) => {
+  const { shop_domain } = req.body;
+  log('🗑️  GDPR shop redact received', { shop: shop_domain });
+
+  try {
+    const { error } = await supabase
+      .from('customers')
+      .delete()
+      .eq('shop_name', shop_domain);
+
+    if (error) log('❌ Failed to redact shop', error.message);
+    else log('✅ Shop data redacted', { shop: shop_domain });
+  } catch (err) {
+    log('❌ Shop redact error', err.message);
+  }
+
+  res.status(200).json({ success: true });
 });
 
 // ============================================================
