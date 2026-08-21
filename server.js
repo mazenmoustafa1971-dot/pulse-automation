@@ -87,36 +87,17 @@ app.get('/auth/callback', async (req, res) => {
     log('✅ Access token received', { shop });
     log('✅ OAuth complete - webhook registration next', { shop });
 
-    // Register webhook for orders
+    // Register webhook for orders (REST API)
     try {
       log('🔗 Registering order webhook', { shop });
 
       const webhookResponse = await axios.post(
-        `https://${shop}/admin/api/2024-01/graphql.json`,
+        `https://${shop}/admin/api/2024-01/webhooks.json`,
         {
-          query: `
-            mutation CreateWebhook($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {
-              webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) {
-                webhookSubscription {
-                  id
-                  topic
-                  endpoint {
-                    __typename
-                  }
-                }
-                userErrors {
-                  field
-                  message
-                }
-              }
-            }
-          `,
-          variables: {
-            topic: 'ORDERS_CREATE',
-            webhookSubscription: {
-              callbackUrl: `${SHOPIFY_APP_URL}/webhooks/orders/create`,
-              format: 'JSON'
-            }
+          webhook: {
+            topic: 'orders/create',
+            address: `${SHOPIFY_APP_URL}/webhooks/orders/create`,
+            format: 'json'
           }
         },
         {
@@ -127,11 +108,10 @@ app.get('/auth/callback', async (req, res) => {
         }
       );
 
-      const errors = webhookResponse.data.data?.webhookSubscriptionCreate?.userErrors;
-      if (errors && errors.length > 0) {
-        log('⚠️  Webhook registration warning', errors);
+      if (webhookResponse.data.webhook) {
+        log('✅ Webhook registered successfully', { shop, webhookId: webhookResponse.data.webhook.id });
       } else {
-        log('✅ Webhook registered successfully', { shop });
+        log('⚠️  Webhook response', webhookResponse.data);
       }
     } catch (webhookError) {
       log('⚠️  Webhook registration error (non-fatal)', webhookError.message);
