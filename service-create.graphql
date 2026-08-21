@@ -1,0 +1,12 @@
+mutation CreateService($projectId: String!, $environmentId: String!) {
+  serviceCreate(input: {
+    projectId: $projectId
+    environmentId: $environmentId
+    name: "pulse-server"
+  }) {
+    service {
+      id
+      name
+    }
+  }
+}

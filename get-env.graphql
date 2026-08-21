@@ -1,0 +1,20 @@
+query {
+  me {
+    projects(first: 1) {
+      edges {
+        node {
+          id
+          name
+          environments(first: 1) {
+            edges {
+              node {
+                id
+                name
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -110,6 +110,56 @@ app.get('/auth/callback', async (req, res) => {
 
     log('✅ Customer saved', { shop, plan: 'basic' });
 
+    // Register webhook for orders
+    try {
+      log('🔗 Registering order webhook', { shop });
+
+      const webhookResponse = await axios.post(
+        `https://${shop}/admin/api/2024-01/graphql.json`,
+        {
+          query: `
+            mutation CreateWebhook($topic: WebhookSubscriptionTopic!, $webhookSubscription: WebhookSubscriptionInput!) {
+              webhookSubscriptionCreate(topic: $topic, webhookSubscription: $webhookSubscription) {
+                webhookSubscription {
+                  id
+                  topic
+                  endpoint {
+                    __typename
+                  }
+                }
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }
+          `,
+          variables: {
+            topic: 'ORDERS_CREATE',
+            webhookSubscription: {
+              callbackUrl: `${SHOPIFY_APP_URL}/webhooks/orders/create`,
+              format: 'JSON'
+            }
+          }
+        },
+        {
+          headers: {
+            'X-Shopify-Access-Token': accessToken,
+            'Content-Type': 'application/json'
+          }
+        }
+      );
+
+      const errors = webhookResponse.data.data?.webhookSubscriptionCreate?.userErrors;
+      if (errors && errors.length > 0) {
+        log('⚠️  Webhook registration warning', errors);
+      } else {
+        log('✅ Webhook registered successfully', { shop });
+      }
+    } catch (webhookError) {
+      log('⚠️  Webhook registration error (non-fatal)', webhookError.message);
+    }
+
     // Redirect to dashboard
     res.redirect(`/dashboard?shop=${shop}&success=true`);
   } catch (error) {
