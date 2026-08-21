@@ -448,6 +448,111 @@ app.get('/debug/webhooks', async (req, res) => {
   }
 });
 
+// ============================================================
+// Privacy Policy & Merchant Terms
+// Real, current data-handling practices -- keep this in sync with the
+// actual code whenever what PULSE stores/does changes.
+// ============================================================
+
+const legalPageStyle = `
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 40px; background: #f5f5f5; color: #222; }
+  .container { max-width: 720px; margin: 0 auto; background: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); padding: 40px; line-height: 1.6; }
+  h1 { color: #222; }
+  h2 { color: #333; margin-top: 32px; font-size: 18px; }
+  .updated { color: #777; font-size: 14px; }
+`;
+
+app.get('/privacy', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head><meta charset="UTF-8"><title>PULSE - Privacy Policy</title><style>${legalPageStyle}</style></head>
+    <body><div class="container">
+      <h1>PULSE Privacy Policy</h1>
+      <p class="updated">Last updated: August 22, 2026</p>
+
+      <p>PULSE ("the App") sends WhatsApp order-confirmation messages on behalf of Shopify
+      merchants who install it. This page explains what customer data the App processes,
+      why, and how it's protected.</p>
+
+      <h2>What we collect</h2>
+      <p>When a merchant installs PULSE and a customer places an order, the App receives
+      from Shopify: the customer's name, email address, phone number, shipping/billing
+      address, and order details (items, price, order number).</p>
+
+      <h2>Why we collect it</h2>
+      <p>Solely to send that customer a WhatsApp message confirming their order, addressed
+      to them by name, sent to their phone number, referencing their order and delivery
+      address. We do not use this data for advertising, profiling, or any purpose beyond
+      order communication.</p>
+
+      <h2>How it's stored</h2>
+      <p>Data is stored in a dedicated Supabase (PostgreSQL) database, encrypted at rest and
+      in transit (HTTPS/TLS on every connection). Access is limited to the app operator;
+      no other staff or third party has access.</p>
+
+      <h2>How long we keep it</h2>
+      <p>Order and message records are retained for 12 months from the order date, then
+      automatically deleted. All data tied to a shop is deleted immediately if the
+      merchant uninstalls the App. All data tied to a specific customer is deleted
+      immediately upon that customer's deletion request (via Shopify's standard data
+      request/redaction tools).</p>
+
+      <h2>Your rights</h2>
+      <p>To request a copy of your data or its deletion, contact the merchant you ordered
+      from -- they can trigger this through Shopify on your behalf. You can also contact us
+      directly at <a href="mailto:arkan.closerver@gmail.com">arkan.closerver@gmail.com</a>.</p>
+
+      <h2>Contact</h2>
+      <p>Questions about this policy: <a href="mailto:arkan.closerver@gmail.com">arkan.closerver@gmail.com</a></p>
+    </div></body>
+    </html>
+  `);
+});
+
+app.get('/terms', (req, res) => {
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="en">
+    <head><meta charset="UTF-8"><title>PULSE - Merchant Terms & Data Processing</title><style>${legalPageStyle}</style></head>
+    <body><div class="container">
+      <h1>PULSE Merchant Terms & Data Processing Agreement</h1>
+      <p class="updated">Last updated: August 22, 2026</p>
+
+      <p>By installing PULSE on your Shopify store, you (the merchant, "Data Controller")
+      and PULSE ("Data Processor") agree to the following.</p>
+
+      <h2>What PULSE does with your customers' data</h2>
+      <p>PULSE processes your customers' name, email, phone, and shipping/billing address
+      solely to send them a WhatsApp order-confirmation message on your behalf. PULSE does
+      not sell this data, use it for advertising, or share it with any third party other
+      than the WhatsApp Cloud API (Meta), which is required to deliver the message itself.</p>
+
+      <h2>Compliance</h2>
+      <p>PULSE implements Shopify's mandatory GDPR webhooks
+      (<code>customers/data_request</code>, <code>customers/redact</code>,
+      <code>shop/redact</code>), so data requests and deletions initiated through Shopify
+      are honored automatically. See our <a href="/privacy">Privacy Policy</a> for our
+      retention schedule.</p>
+
+      <h2>Your responsibility</h2>
+      <p>You remain responsible for your own compliance with applicable privacy laws (e.g.
+      GDPR, CCPA) in how you run your store and communicate with your customers. PULSE
+      provides the tooling described above to help you meet those obligations for the
+      order-confirmation messages it sends.</p>
+
+      <h2>Security incidents</h2>
+      <p>If PULSE becomes aware of a security incident affecting your data, we will notify
+      you at the email associated with your Shopify account within 72 hours of
+      confirming the incident.</p>
+
+      <h2>Contact</h2>
+      <p><a href="mailto:arkan.closerver@gmail.com">arkan.closerver@gmail.com</a></p>
+    </div></body>
+    </html>
+  `);
+});
+
 app.get('/health', (req, res) => {
   res.json({
     status: 'OK',
@@ -524,6 +629,35 @@ app.use((err, req, res, next) => {
 });
 
 // ============================================================
+// Data Retention Enforcement
+// Per /privacy: order/message records older than 12 months are deleted
+// automatically. Runs on startup and then once every 24h -- this is what
+// makes the retention policy real rather than just a documented promise.
+// ============================================================
+
+const RETENTION_DAYS = 365;
+
+async function enforceRetentionPolicy() {
+  const cutoff = new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000).toISOString();
+
+  try {
+    const { data: deletedOrders, error } = await supabase
+      .from('orders')
+      .delete()
+      .lt('created_at', cutoff)
+      .select('id');
+
+    if (error) {
+      log('❌ Retention cleanup failed', error.message);
+    } else {
+      log('🧹 Retention cleanup complete', { ordersDeleted: deletedOrders?.length || 0, cutoff });
+    }
+  } catch (err) {
+    log('❌ Retention cleanup error', err.message);
+  }
+}
+
+// ============================================================
 // Start Server
 // ============================================================
 
@@ -533,4 +667,7 @@ app.listen(PORT, () => {
   log(`🚀 ${APP_NAME} v${APP_VERSION} started on port ${PORT}`);
   log('📍 Local: http://localhost:' + PORT);
   log('✅ Ready to receive requests');
+
+  enforceRetentionPolicy();
+  setInterval(enforceRetentionPolicy, 24 * 60 * 60 * 1000);
 });

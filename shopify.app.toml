@@ -1,0 +1,32 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+name = "PULSE"
+client_id = "d8c61a847f375d8b6152386eb14e8f2a"
+application_url = "https://pulse-automation-production.up.railway.app"
+embedded = true
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_checkouts,read_customers,write_customers,read_inventory,read_orders,write_orders,read_products"
+optional_scopes = [ ]
+use_legacy_install_flow = false
+
+[webhooks]
+api_version = "2026-07"
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/customers/data_request"
+  compliance_topics = [ "customers/data_request" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/customers/redact"
+  compliance_topics = [ "customers/redact" ]
+
+  [[webhooks.subscriptions]]
+  uri = "/webhooks/shop/redact"
+  compliance_topics = [ "shop/redact" ]
+
+[auth]
+redirect_urls = [
+  "https://pulse-automation-production.up.railway.app/auth/callback"
+]
