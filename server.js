@@ -85,33 +85,7 @@ app.get('/auth/callback', async (req, res) => {
     }
 
     log('✅ Access token received', { shop });
-
-    // Save to Supabase (non-blocking)
-    log('💾 Saving customer to Supabase', { shop });
-
-    supabase
-      .from('customers')
-      .upsert(
-        [
-          {
-            shop_name: shop,
-            api_key: SHOPIFY_API_KEY,
-            access_token: accessToken,
-            plan: 'basic',
-          }
-        ],
-        { onConflict: 'shop_name' }
-      )
-      .then(({ data, error }) => {
-        if (error) {
-          log('⚠️  Supabase save warning (non-blocking)', error.message);
-        } else {
-          log('✅ Customer saved', { shop, plan: 'basic' });
-        }
-      })
-      .catch(err => {
-        log('⚠️  Supabase save error (caught)', err.message);
-      });
+    log('✅ OAuth complete - webhook registration next', { shop });
 
     // Register webhook for orders
     try {
