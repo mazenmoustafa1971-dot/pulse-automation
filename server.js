@@ -294,8 +294,69 @@ app.get('/api/stats', async (req, res) => {
 });
 
 // ============================================================
-// Health Check
+// Debug & Health Check
 // ============================================================
+
+// Debug: Check webhook registration for a shop
+app.get('/debug/webhooks', async (req, res) => {
+  const { shop } = req.query;
+
+  if (!shop) {
+    return res.status(400).json({ error: 'Shop parameter required' });
+  }
+
+  try {
+    const { data: customer } = await supabase
+      .from('customers')
+      .select('access_token')
+      .eq('shop_name', shop)
+      .single();
+
+    if (!customer) {
+      return res.status(404).json({ error: 'Customer not found' });
+    }
+
+    const webhooksResponse = await axios.post(
+      `https://${shop}/admin/api/2024-01/graphql.json`,
+      {
+        query: `
+          query {
+            webhookSubscriptions(first: 10) {
+              edges {
+                node {
+                  id
+                  topic
+                  endpoint {
+                    __typename
+                  }
+                }
+              }
+            }
+          }
+        `
+      },
+      {
+        headers: {
+          'X-Shopify-Access-Token': customer.access_token,
+          'Content-Type': 'application/json'
+        }
+      }
+    );
+
+    const webhooks = webhooksResponse.data.data?.webhookSubscriptions?.edges || [];
+    res.json({
+      shop,
+      webhookCount: webhooks.length,
+      webhooks: webhooks.map(w => ({
+        topic: w.node.topic,
+        id: w.node.id
+      }))
+    });
+  } catch (error) {
+    log('❌ Debug webhook check error', error.message);
+    res.status(500).json({ error: 'Failed to check webhooks', details: error.message });
+  }
+});
 
 app.get('/health', (req, res) => {
   res.json({
