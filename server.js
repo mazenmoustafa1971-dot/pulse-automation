@@ -790,8 +790,82 @@ app.get('/health', (req, res) => {
 // Dashboard Page (Simple HTML)
 // ============================================================
 
-app.get('/dashboard', (req, res) => {
+const STATUS_COLORS = {
+  pending: '#856404;background:#fff3cd',
+  confirmed: '#155724;background:#d4edda',
+  cancelled: '#721c24;background:#f8d7da',
+  shipped: '#0c5aa0;background:#e7f3ff',
+};
+
+const MSG_STATUS_COLORS = {
+  sent: '#155724;background:#d4edda',
+  failed: '#721c24;background:#f8d7da',
+  pending: '#856404;background:#fff3cd',
+  delivered: '#0c5aa0;background:#e7f3ff',
+  read: '#0c5aa0;background:#e7f3ff',
+};
+
+function escapeHtml(s) {
+  return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+app.get('/dashboard', async (req, res) => {
   const { shop, success } = req.query;
+
+  if (!shop) {
+    return res.send(`
+      <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>PULSE</title>
+      <style>body{font-family:-apple-system,sans-serif;padding:40px;background:#f5f5f5;}</style></head>
+      <body><p>Missing <code>?shop=</code> parameter.</p></body></html>
+    `);
+  }
+
+  const { data: customer } = await supabase
+    .from('customers')
+    .select('*')
+    .eq('shop_name', shop)
+    .single();
+
+  let orderRows = '';
+  let messagesSent = 0;
+  let messagesFailed = 0;
+
+  if (customer) {
+    const { data: orders } = await supabase
+      .from('orders')
+      .select('*')
+      .eq('customer_id', customer.id)
+      .order('created_at', { ascending: false })
+      .limit(50);
+
+    const { data: messages } = await supabase
+      .from('messages')
+      .select('*')
+      .eq('customer_id', customer.id);
+
+    messagesSent = messages?.filter(m => m.status === 'sent').length || 0;
+    messagesFailed = messages?.filter(m => m.status === 'failed').length || 0;
+
+    orderRows = (orders || []).map(o => {
+      const items = (o.order_data?.line_items || []).map(li => `${li.quantity}x ${li.title}`).join(', ') || '-';
+      const orderMessages = (messages || []).filter(m => m.order_id === o.id);
+      const lastMsg = orderMessages.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0];
+      const msgStatus = lastMsg ? lastMsg.status : (o.whatsapp_sent ? 'sent' : 'not sent');
+      const msgColor = MSG_STATUS_COLORS[msgStatus] || '#666;background:#eee';
+      const statusColor = STATUS_COLORS[o.status] || '#666;background:#eee';
+
+      return `
+        <tr>
+          <td>${escapeHtml(o.order_data?.name || o.shopify_order_id)}</td>
+          <td>${escapeHtml(items)}</td>
+          <td>${escapeHtml(o.phone_number || '-')}</td>
+          <td><span class="pill" style="color:${statusColor}">${escapeHtml(o.status)}</span></td>
+          <td><span class="pill" style="color:${msgColor}">${escapeHtml(msgStatus)}</span></td>
+          <td>${new Date(o.created_at).toLocaleString()}</td>
+        </tr>
+      `;
+    }).join('');
+  }
 
   const html = `
     <!DOCTYPE html>
@@ -801,32 +875,48 @@ app.get('/dashboard', (req, res) => {
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
       <title>PULSE - WhatsApp Orders</title>
       <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif; margin: 0; padding: 40px; background: #f5f5f5; }
-        .container { max-width: 800px; margin: 0 auto; background: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); padding: 40px; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif; margin: 0; padding: 40px; background: #f5f5f5; color: #222; }
+        .container { max-width: 1000px; margin: 0 auto; background: white; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); padding: 40px; }
         h1 { color: #333; margin-top: 0; }
         .success { background: #d4edda; border-left: 4px solid #28a745; padding: 15px; margin: 20px 0; border-radius: 4px; color: #155724; }
-        .info { background: #e7f3ff; border-left: 4px solid #2196F3; padding: 15px; margin: 20px 0; border-radius: 4px; color: #0c5aa0; }
         .shop-name { font-weight: bold; color: #2196F3; }
-        code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-family: 'Courier New', monospace; }
+        .stats { display: flex; gap: 16px; margin: 24px 0; }
+        .stat { flex: 1; background: #f8f9fa; border-radius: 8px; padding: 16px; text-align: center; }
+        .stat .num { font-size: 28px; font-weight: bold; color: #222; }
+        .stat .label { font-size: 13px; color: #777; margin-top: 4px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 16px; }
+        th { text-align: left; font-size: 12px; text-transform: uppercase; color: #777; padding: 8px 12px; border-bottom: 2px solid #eee; }
+        td { padding: 10px 12px; border-bottom: 1px solid #f0f0f0; font-size: 14px; }
+        .pill { padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
+        .empty { text-align: center; color: #999; padding: 40px; }
       </style>
     </head>
     <body>
       <div class="container">
-        <h1>🎉 Welcome to PULSE</h1>
+        <h1>📲 PULSE Dashboard</h1>
         ${success ? `
           <div class="success">
             ✅ <strong>Successfully connected!</strong><br>
-            Your store <span class="shop-name">${shop}</span> is now connected to PULSE.
+            Your store <span class="shop-name">${escapeHtml(shop)}</span> is now connected to PULSE.
           </div>
         ` : ''}
-        <div class="info">
-          <strong>Next Steps:</strong><br>
-          1. Set up your WhatsApp integration<br>
-          2. Configure your order templates<br>
-          3. Test your first automated order
+        <p class="shop-name">${escapeHtml(shop)}</p>
+
+        <div class="stats">
+          <div class="stat"><div class="num">${orderRows ? orderRows.split('<tr>').length - 1 : 0}</div><div class="label">Orders tracked</div></div>
+          <div class="stat"><div class="num">${messagesSent}</div><div class="label">Messages sent</div></div>
+          <div class="stat"><div class="num">${messagesFailed}</div><div class="label">Messages failed</div></div>
         </div>
-        <p>Dashboard coming soon! For now, check the API:</p>
-        <code>GET /api/stats?shop=${shop || 'your-store.myshopify.com'}</code>
+
+        <table>
+          <thead>
+            <tr><th>Order</th><th>Items</th><th>Phone</th><th>Status</th><th>WhatsApp</th><th>Created</th></tr>
+          </thead>
+          <tbody>
+            ${orderRows || ''}
+          </tbody>
+        </table>
+        ${!orderRows ? '<div class="empty">No orders yet.</div>' : ''}
       </div>
     </body>
     </html>
