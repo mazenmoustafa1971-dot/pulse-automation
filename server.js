@@ -203,7 +203,7 @@ async function sendOrderConfirmation(order, customerId, orderRowId, phoneNumber,
 
   // Language selection: default to English for now. Once merchants can set
   // a preferred storefront language, branch on that here -- the template
-  // (pulse_order_confirmation) already exists in en/ar/es/fr/de.
+  // (pulse_order_confirmation_v2) already exists in en/ar/es/fr/de.
   const languageCode = 'en';
 
   const requestBody = {
@@ -211,7 +211,7 @@ async function sendOrderConfirmation(order, customerId, orderRowId, phoneNumber,
     to: phoneNumber,
     type: 'template',
     template: {
-      name: 'pulse_order_confirmation',
+      name: 'pulse_order_confirmation_v2',
       language: { code: languageCode },
       components: [{
         type: 'body',
