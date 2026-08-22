@@ -22,6 +22,8 @@ app.use(bodyParser.urlencoded({ extended: true }));
 const SHOPIFY_API_KEY = process.env.SHOPIFY_API_KEY;
 const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
 const SHOPIFY_APP_URL = process.env.SHOPIFY_APP_URL;
+const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
+const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
 const APP_NAME = 'PULSE';
 const APP_VERSION = '0.1.0';
 
@@ -174,6 +176,72 @@ app.get('/auth/callback', async (req, res) => {
   }
 });
 
+// Send the WhatsApp order-confirmation message via a pre-approved template.
+// This is business-initiated (the customer never messaged us first), so
+// WhatsApp requires an approved template -- a plain-text session message
+// would be rejected outside any existing 24h conversation window.
+async function sendOrderConfirmation(order, customerId, orderRowId, phoneNumber) {
+  const name = order.customer?.first_name || order.shipping_address?.first_name || 'there';
+  const items = (order.line_items || []).map(li => `${li.quantity}x ${li.title}`).join(', ') || 'your order';
+  const addr = order.shipping_address
+    ? `${order.shipping_address.address1 || ''}, ${order.shipping_address.city || ''}`.replace(/^,\s*|,\s*$/g, '')
+    : 'the address on file';
+
+  const requestBody = {
+    messaging_product: 'whatsapp',
+    to: phoneNumber,
+    type: 'template',
+    template: {
+      name: 'pulse_order_confirmation',
+      language: { code: 'en' },
+      components: [{
+        type: 'body',
+        parameters: [
+          { type: 'text', text: name },
+          { type: 'text', text: items },
+          { type: 'text', text: addr || 'the address on file' },
+        ]
+      }]
+    }
+  };
+
+  let waMessageId = null;
+  let errorMessage = null;
+
+  try {
+    const response = await axios.post(
+      `https://graph.facebook.com/v20.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`,
+      requestBody,
+      { headers: { Authorization: `Bearer ${WHATSAPP_ACCESS_TOKEN}`, 'Content-Type': 'application/json' } }
+    );
+    waMessageId = response.data.messages?.[0]?.id || null;
+    log('✅ WhatsApp confirmation sent', { phoneNumber, waMessageId });
+  } catch (err) {
+    errorMessage = err.response?.data?.error?.message || err.message;
+    log('❌ WhatsApp send failed', errorMessage);
+  }
+
+  await supabase.from('messages').insert([{
+    customer_id: customerId,
+    order_id: orderRowId,
+    message_text: JSON.stringify(requestBody),
+    message_type: 'confirmation',
+    direction: 'outbound',
+    status: waMessageId ? 'sent' : 'failed',
+    sent_at: waMessageId ? new Date().toISOString() : null,
+    error_message: errorMessage,
+  }]);
+
+  if (waMessageId && orderRowId) {
+    await supabase
+      .from('orders')
+      .update({ whatsapp_sent: true, whatsapp_sent_at: new Date().toISOString() })
+      .eq('id', orderRowId);
+  }
+
+  return waMessageId;
+}
+
 // ============================================================
 // Webhook Handlers
 // ============================================================
@@ -205,21 +273,31 @@ app.post('/webhooks/orders/create', verifyShopifyWebhook, async (req, res) => {
 
     // Save order to Supabase
     if (customerId) {
+      const phoneNumber = order.customer?.phone || order.billing_address?.phone;
+
       const { data: savedOrder, error: orderError } = await supabase
         .from('orders')
         .insert([{
           customer_id: customerId,
           shopify_order_id: order.id.toString(),
-          phone_number: order.customer?.phone || order.billing_address?.phone,
+          phone_number: phoneNumber,
           order_data: order,
           status: 'pending',
           whatsapp_sent: false
-        }]);
+        }])
+        .select('id')
+        .single();
 
       if (orderError) {
         log('❌ Failed to save order', { orderId: order.id, error: orderError.message });
       } else {
         log('✅ Order saved to Supabase', { orderId: order.id, customerId });
+
+        if (phoneNumber) {
+          await sendOrderConfirmation(order, customerId, savedOrder.id, phoneNumber);
+        } else {
+          log('⚠️  No phone number on order, skipping WhatsApp send', { orderId: order.id });
+        }
       }
     } else {
       log('⚠️  Could not find customer for order', { orderId: order.id });
