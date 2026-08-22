@@ -121,12 +121,25 @@ app.get('/auth/callback', async (req, res) => {
 
     log('✅ Access token received', { shop });
 
+    // Fetch the merchant's real store name so the WhatsApp confirmation
+    // message can say "Thank you for shopping with <their store>" instead
+    // of a hardcoded brand -- PULSE serves many different stores.
+    let storeName = shop;
+    try {
+      const shopInfo = await axios.get(`https://${shop}/admin/api/2024-01/shop.json`, {
+        headers: { 'X-Shopify-Access-Token': accessToken }
+      });
+      storeName = shopInfo.data.shop?.name || shop;
+    } catch (shopInfoError) {
+      log('⚠️  Could not fetch shop name, falling back to domain (non-fatal)', shopInfoError.message);
+    }
+
     // Save/update the merchant record so downstream lookups (order webhook,
     // /api/stats, /debug/webhooks) can find this shop by shop_name.
     const { error: customerError } = await supabase
       .from('customers')
       .upsert(
-        { shop_name: shop, api_key: SHOPIFY_API_KEY, access_token: accessToken },
+        { shop_name: shop, api_key: SHOPIFY_API_KEY, access_token: accessToken, store_name: storeName },
         { onConflict: 'shop_name' }
       );
 
@@ -180,12 +193,18 @@ app.get('/auth/callback', async (req, res) => {
 // This is business-initiated (the customer never messaged us first), so
 // WhatsApp requires an approved template -- a plain-text session message
 // would be rejected outside any existing 24h conversation window.
-async function sendOrderConfirmation(order, customerId, orderRowId, phoneNumber) {
+async function sendOrderConfirmation(order, customerId, orderRowId, phoneNumber, storeName) {
   const name = order.customer?.first_name || order.shipping_address?.first_name || 'there';
   const items = (order.line_items || []).map(li => `${li.quantity}x ${li.title}`).join(', ') || 'your order';
   const addr = order.shipping_address
     ? `${order.shipping_address.address1 || ''}, ${order.shipping_address.city || ''}`.replace(/^,\s*|,\s*$/g, '')
     : 'the address on file';
+  const total = order.total_price ? `${order.total_price} ${order.currency || ''}`.trim() : 'N/A';
+
+  // Language selection: default to English for now. Once merchants can set
+  // a preferred storefront language, branch on that here -- the template
+  // (pulse_order_confirmation) already exists in en/ar/es/fr/de.
+  const languageCode = 'en';
 
   const requestBody = {
     messaging_product: 'whatsapp',
@@ -193,12 +212,15 @@ async function sendOrderConfirmation(order, customerId, orderRowId, phoneNumber)
     type: 'template',
     template: {
       name: 'pulse_order_confirmation',
-      language: { code: 'en' },
+      language: { code: languageCode },
       components: [{
         type: 'body',
         parameters: [
           { type: 'text', text: name },
+          { type: 'text', text: storeName || 'us' },
+          { type: 'text', text: order.name || order.order_number || `#${order.id}` },
           { type: 'text', text: items },
+          { type: 'text', text: total },
           { type: 'text', text: addr || 'the address on file' },
         ]
       }]
@@ -262,13 +284,15 @@ app.post('/webhooks/orders/create', verifyShopifyWebhook, async (req, res) => {
 
     // Get customer record to link order
     let customerId;
+    let storeName;
     if (shopName) {
       const { data: customer } = await supabase
         .from('customers')
-        .select('id')
+        .select('id, store_name')
         .eq('shop_name', shopName)
         .single();
       customerId = customer?.id;
+      storeName = customer?.store_name;
     }
 
     // Save order to Supabase
@@ -294,7 +318,7 @@ app.post('/webhooks/orders/create', verifyShopifyWebhook, async (req, res) => {
         log('✅ Order saved to Supabase', { orderId: order.id, customerId });
 
         if (phoneNumber) {
-          await sendOrderConfirmation(order, customerId, savedOrder.id, phoneNumber);
+          await sendOrderConfirmation(order, customerId, savedOrder.id, phoneNumber, storeName);
         } else {
           log('⚠️  No phone number on order, skipping WhatsApp send', { orderId: order.id });
         }
