@@ -24,8 +24,17 @@ const SHOPIFY_API_SECRET = process.env.SHOPIFY_API_SECRET;
 const SHOPIFY_APP_URL = process.env.SHOPIFY_APP_URL;
 const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
 const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
+const WHATSAPP_VERIFY_TOKEN = process.env.WHATSAPP_VERIFY_TOKEN;
+const META_APP_SECRET = process.env.META_APP_SECRET;
 const APP_NAME = 'PULSE';
 const APP_VERSION = '0.1.0';
+
+// Digits only, no "+"/spaces/dashes -- WhatsApp's own `from` field on
+// inbound messages has no "+", but numbers coming from Shopify (order.phone,
+// billing_address.phone) can be formatted many different ways. Normalizing
+// both sides the same way is what makes matching a reply back to an order
+// reliable.
+const normalizePhone = (p) => (p || '').replace(/\D/g, '');
 
 // Logging
 const log = (message, data = '') => {
@@ -55,6 +64,31 @@ function verifyShopifyWebhook(req, res, next) {
 
   if (!valid) {
     log('❌ Webhook rejected: HMAC mismatch');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  next();
+}
+
+// Verify a webhook actually came from Meta/WhatsApp: same idea as Shopify's
+// check above, but Meta signs with the app's App Secret (not the WhatsApp
+// access token) and sends it as "sha256=<hex digest>" in this header.
+function verifyMetaWebhook(req, res, next) {
+  const sigHeader = req.headers['x-hub-signature-256'];
+
+  if (!sigHeader || !req.rawBody) {
+    log('❌ WhatsApp webhook rejected: missing signature or body');
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const expected = 'sha256=' + crypto.createHmac('sha256', META_APP_SECRET).update(req.rawBody).digest('hex');
+
+  const expectedBuf = Buffer.from(expected);
+  const sigBuf = Buffer.from(sigHeader);
+  const valid = expectedBuf.length === sigBuf.length && crypto.timingSafeEqual(expectedBuf, sigBuf);
+
+  if (!valid) {
+    log('❌ WhatsApp webhook rejected: signature mismatch');
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
@@ -297,7 +331,7 @@ app.post('/webhooks/orders/create', verifyShopifyWebhook, async (req, res) => {
 
     // Save order to Supabase
     if (customerId) {
-      const phoneNumber = order.customer?.phone || order.billing_address?.phone;
+      const phoneNumber = normalizePhone(order.customer?.phone || order.billing_address?.phone);
 
       const { data: savedOrder, error: orderError } = await supabase
         .from('orders')
@@ -331,6 +365,94 @@ app.post('/webhooks/orders/create', verifyShopifyWebhook, async (req, res) => {
   } catch (error) {
     log('❌ Webhook error', error.message);
     res.status(500).json({ error: 'Webhook failed' });
+  }
+});
+
+// ============================================================
+// WhatsApp Inbound Messages (button-tap replies to order confirmations)
+// ============================================================
+
+// Meta calls this once with a GET request to verify the webhook URL when
+// you subscribe it in the App Dashboard -- it must echo back hub.challenge
+// if hub.verify_token matches what we configured there.
+app.get('/webhooks/whatsapp', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
+
+  if (mode === 'subscribe' && token === WHATSAPP_VERIFY_TOKEN) {
+    log('✅ WhatsApp webhook verified by Meta');
+    return res.status(200).send(challenge);
+  }
+
+  log('❌ WhatsApp webhook verification failed', { mode });
+  res.sendStatus(403);
+});
+
+// Every inbound WhatsApp event (message, button reply, delivery/read status)
+// arrives here. We only act on button-reply taps to an order confirmation;
+// everything else is acknowledged and ignored.
+app.post('/webhooks/whatsapp', verifyMetaWebhook, async (req, res) => {
+  try {
+    const value = req.body.entry?.[0]?.changes?.[0]?.value;
+    const message = value?.messages?.[0];
+
+    if (!message) {
+      // Status callbacks (sent/delivered/read) have no `messages` array --
+      // nothing for us to do with those yet.
+      return res.sendStatus(200);
+    }
+
+    const buttonReplyTitle = message.button?.text || message.interactive?.button_reply?.title;
+    const fromPhone = normalizePhone(message.from);
+
+    log('💬 WhatsApp reply received', { fromPhone, buttonReplyTitle });
+
+    if (!buttonReplyTitle) {
+      return res.sendStatus(200);
+    }
+
+    // Match to the most recent order we sent a confirmation for on this
+    // phone number -- this is the order the reply is almost certainly about.
+    const { data: order } = await supabase
+      .from('orders')
+      .select('id, customer_id')
+      .eq('phone_number', fromPhone)
+      .eq('whatsapp_sent', true)
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (!order) {
+      log('⚠️  No matching order found for this reply', { fromPhone });
+      return res.sendStatus(200);
+    }
+
+    let newStatus = null;
+    if (buttonReplyTitle === 'Confirm Order') newStatus = 'confirmed';
+    else if (buttonReplyTitle === 'Cancel Order') newStatus = 'cancelled';
+
+    if (newStatus) {
+      await supabase.from('orders').update({ status: newStatus }).eq('id', order.id);
+    }
+
+    await supabase.from('messages').insert([{
+      customer_id: order.customer_id,
+      order_id: order.id,
+      message_text: buttonReplyTitle,
+      message_type: 'confirmation',
+      direction: 'inbound',
+      status: 'delivered',
+      sent_at: new Date().toISOString(),
+    }]);
+
+    log('✅ Order status updated from WhatsApp reply', { orderId: order.id, newStatus });
+    res.sendStatus(200);
+  } catch (err) {
+    // Always 200 -- returning an error here makes Meta retry-storm the
+    // webhook, which just repeats whatever went wrong.
+    log('❌ WhatsApp inbound webhook error', err.message);
+    res.sendStatus(200);
   }
 });
 
